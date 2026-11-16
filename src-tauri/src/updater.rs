@@ -6,7 +6,7 @@
 //!   3. `install_update` 改名运行中的 exe，复制新版本并分离式重启。
 //!      下次启动时 `cleanup_old_exe` 删掉 .old。
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// 仓库地址：可在发布新版本时直接改这里
 const REPO: &str = "qfgk/PinTodo";
@@ -46,29 +46,16 @@ fn parse_ver(s: &str) -> (u64, u64, u64) {
     )
 }
 
-#[derive(Debug, Deserialize)]
-struct GhAsset {
-    name: String,
-    browser_download_url: String,
-    #[serde(default)]
-    size: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhRelease {
-    tag_name: String,
-    #[serde(default)]
-    body: Option<String>,
-    #[serde(default)]
-    assets: Vec<GhAsset>,
-}
-
 #[tauri::command]
 pub fn app_version() -> String {
     current_version()
 }
 
-/// 检查最新版本：无更新返回 None；有更新返回 UpdateInfo
+/// 检查最新版本：无更新返回 None；有更新返回 UpdateInfo。
+///
+/// 不走 api.github.com（匿名 60 次/小时限流，容易 403），
+/// 而是访问 releases/latest 页面 —— GitHub 会 302 跳转到 /releases/tag/vX.Y.Z，
+/// 从最终 URL 里读出版本号，安装包地址按命名约定拼接，完全不受配额限制。
 #[tauri::command]
 pub async fn check_update() -> Result<Option<UpdateInfo>, String> {
     let client = reqwest::Client::builder()
@@ -77,34 +64,46 @@ pub async fn check_update() -> Result<Option<UpdateInfo>, String> {
         .build()
         .map_err(|e| format!("初始化网络客户端失败：{e}"))?;
 
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let page = format!("https://github.com/{REPO}/releases/latest");
     let resp = client
-        .get(url)
-        .header("Accept", "application/vnd.github+json")
+        .get(page)
         .send()
         .await
         .map_err(|e| format!("网络不可用：{e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("仓库还没有发布任何版本".into());
+    }
     if !resp.status().is_success() {
         return Err(format!("GitHub 返回 {}", resp.status()));
     }
-    let rel: GhRelease = resp.json().await.map_err(|e| format!("解析版本信息失败：{e}"))?;
 
-    let latest = rel.tag_name.trim().trim_start_matches(['v', 'V']).to_string();
+    // 跟随跳转后的最终 URL 形如 https://github.com/{REPO}/releases/tag/v1.0.2
+    let final_url = resp.url().to_string();
+    let marker = "/tag/";
+    let tag = match final_url.rsplit_once(marker) {
+        Some((_, t)) if !t.is_empty() && t.len() <= 64 => t.to_string(),
+        _ => return Err("无法从 GitHub 解析最新版本号".into()),
+    };
+    let tag_ok = tag
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'));
+    if !tag_ok {
+        return Err("解析到的版本号格式异常".into());
+    }
+
+    let latest = tag.trim().trim_start_matches(['v', 'V']).to_string();
     if parse_ver(&latest) <= parse_ver(&current_version()) {
         return Ok(None);
     }
-    let asset = rel
-        .assets
-        .iter()
-        .filter(|a| a.name.to_lowercase().ends_with(".exe"))
-        .max_by_key(|a| a.size)
-        .ok_or_else(|| "最新版本没有附带 exe 安装包".to_string())?;
+
+    // 安装包按命名约定：releases/download/{tag}/PinTodo-{version}.exe
+    let url = format!("https://github.com/{REPO}/releases/download/{tag}/PinTodo-{latest}.exe");
 
     Ok(Some(UpdateInfo {
         version: latest,
-        tag: rel.tag_name,
-        notes: rel.body.unwrap_or_default(),
-        url: asset.browser_download_url.clone(),
+        tag,
+        notes: String::new(),
+        url,
         current: current_version(),
     }))
 }
