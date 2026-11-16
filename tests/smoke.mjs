@@ -492,6 +492,73 @@ async function main() {
   })`)
   check('点击挂起标记恢复任务（回到原时间分组）', !resumedInfo.stillParked && resumedInfo.chipGone && resumedInfo.backInList && resumedInfo.inTimeGroup, JSON.stringify(resumedInfo))
 
+  // ---------- 6.8 删除确认 + 底部统计与行数一致 ----------
+  console.log('■ 删除确认与统计')
+  // 统计口径：无筛选时「共 N 项」应等于列表实际行数（次日归档的完成项不计入）
+  const statInfo = await evalIn(page, `(() => {
+    const m = (document.querySelector('.foot-stat')?.textContent || '').match(/共\\s*(\\d+)\\s*项/)
+    return { stat: m ? Number(m[1]) : null, rows: document.querySelectorAll('.row').length }
+  })()`)
+  check('底部统计「共 N 项」与实际行数一致', statInfo.stat !== null && statInfo.stat === statInfo.rows, JSON.stringify(statInfo))
+
+  // 新建一条专用任务用于删除测试
+  await evalIn(page, `(() => {
+    const inp = document.querySelector('.new-input')
+    inp.focus()
+    inp.value = '删除确认测试任务'
+    inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    return true
+  })()`)
+  await sleep(300)
+  const delOpen = await evalIn(page, `(() => {
+    const rows = [...document.querySelectorAll('.row')]
+    const hit = rows.find((r) => (r.querySelector('.txt')?.textContent || '').includes('删除确认测试任务'))
+    hit?.querySelector('.del')?.click()
+    return !!document.querySelector('.confirm-card')
+  })()`)
+  check('点击删除按钮弹出确认框', !!delOpen)
+  // 取消：任务保留
+  await evalIn(page, `document.querySelector('.confirm-cancel')?.click()`)
+  await sleep(250)
+  const cancelKeep = await evalIn(page, `({
+    modalGone: !document.querySelector('.confirm-card'),
+    rowStill: [...document.querySelectorAll('.row')].some((r) => (r.querySelector('.txt')?.textContent || '').includes('删除确认测试任务')),
+  })`)
+  check('取消删除后任务保留', cancelKeep.modalGone && cancelKeep.rowStill, JSON.stringify(cancelKeep))
+  // Esc 关闭确认框
+  await evalIn(page, `(() => {
+    const rows = [...document.querySelectorAll('.row')]
+    const hit = rows.find((r) => (r.querySelector('.txt')?.textContent || '').includes('删除确认测试任务'))
+    hit?.querySelector('.del')?.click()
+    return true
+  })()`)
+  await sleep(150)
+  await evalIn(page, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+  await sleep(200)
+  const escClosed = await evalIn(page, `!document.querySelector('.confirm-card') && window.__pintodo.wstate() === 'normal'`)
+  check('Esc 关闭确认框且不误触发收起', !!escClosed)
+  // 确认删除：任务移除
+  await evalIn(page, `(() => {
+    const rows = [...document.querySelectorAll('.row')]
+    const hit = rows.find((r) => (r.querySelector('.txt')?.textContent || '').includes('删除确认测试任务'))
+    hit?.querySelector('.del')?.click()
+    return true
+  })()`)
+  await sleep(150)
+  await evalIn(page, `document.querySelector('.confirm-del')?.click()`)
+  await sleep(350)
+  const delGone = await evalIn(page, `({
+    modalGone: !document.querySelector('.confirm-card'),
+    rowGone: ![...document.querySelectorAll('.row')].some((r) => (r.querySelector('.txt')?.textContent || '').includes('删除确认测试任务')),
+    undone: !!document.querySelector('.toast-undo'),
+  })`)
+  check('确认删除后任务移除且提供撤销', delGone.modalGone && delGone.rowGone && delGone.undone, JSON.stringify(delGone))
+  const statAfter = await evalIn(page, `(() => {
+    const m = (document.querySelector('.foot-stat')?.textContent || '').match(/共\\s*(\\d+)\\s*项/)
+    return { stat: m ? Number(m[1]) : null, rows: document.querySelectorAll('.row').length }
+  })()`)
+  check('删除后统计与行数仍一致', statAfter.stat !== null && statAfter.stat === statAfter.rows, JSON.stringify(statAfter))
+
   // ---------- 7. 贴边隐藏 / 唤回 ----------
   console.log('■ 贴边循环')
   await evalIn(page, `window.__pintodo.hide('right')`)

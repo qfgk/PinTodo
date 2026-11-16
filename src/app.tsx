@@ -12,7 +12,7 @@ import {
   MainApp, setActions, toast, focusNewInput, getVisible,
   setCurrentList, setView, allLists, currentList, view, searchOpen,
   selId, setSelId, exportSearchToggle, helpOpen, setHelpOpen,
-  progModalTask, setProgModalTask,
+  progModalTask, setProgModalTask, deleteConfirmTask, setDeleteConfirmTask,
 } from './ui'
 import { initTheme, currentMode, setTheme } from './theme'
 import { toggleStats } from './stats'
@@ -194,7 +194,8 @@ function wireKeyboard() {
       return
     }
     if (e.key === 'Escape') {
-      if (progModalTask()) setProgModalTask(null)
+      if (deleteConfirmTask()) setDeleteConfirmTask(null)
+      else if (progModalTask()) setProgModalTask(null)
       else if (helpOpen()) setHelpOpen(false)
       else if (searchOpen()) exportSearchToggle(false)
       else if (selId()) setSelId(null)

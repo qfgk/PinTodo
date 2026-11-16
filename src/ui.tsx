@@ -24,6 +24,8 @@ const [helpOpen, setHelpOpen] = createSignal(false)
 const [progModalTask, setProgModalTask] = createSignal<Task | null>(null)
 /** 事项标签管理弹窗 */
 const [tagModalTask, setTagModalTask] = createSignal<Task | null>(null)
+/** 删除确认弹窗（行内 × 与右键菜单共用） */
+const [deleteConfirmTask, setDeleteConfirmTask] = createSignal<Task | null>(null)
 /** 历史视图：选中的日期（当日 0 点）与月份锚点 */
 const [historySel, setHistorySel] = createSignal<number | null>(null)
 const [historyMonth, setHistoryMonth] = createSignal<{ y: number; m: number } | null>(null)
@@ -44,6 +46,7 @@ export {
   query, setQuery, searchOpen, setSearchOpen, selId, setSelId,
   helpOpen, setHelpOpen, historySel, setHistorySel, historyMonth, setHistoryMonth,
   progModalTask, setProgModalTask, tagModalTask, setTagModalTask,
+  deleteConfirmTask, setDeleteConfirmTask,
   collapsedGroups, setCollapsedGroups,
 }
 
@@ -239,8 +242,8 @@ function TaskRow(props: { id: string }) {
     S.toggleTask(props.id)
   }
   const remove = () => {
-    S.deleteTask(props.id)
-    toast('已删除', '删除')
+    const cur = t()
+    if (cur) setDeleteConfirmTask(cur)
   }
 
   const toggleDesc = () => {
@@ -571,7 +574,7 @@ function rowMenu(t: Task, x: number, y: number, beginEdit: () => void, openProg:
     { label: '重复：每月', action: () => S.setRecur(t.id, 'monthly') },
     ...(t.recur ? [{ label: '停止重复', action: () => S.setRecur(t.id, null) }] : []),
     { sep: true },
-    { label: '删除', danger: true, action: () => { S.deleteTask(t.id); toast('已删除', '删除') } },
+    { label: '删除', danger: true, action: () => setDeleteConfirmTask(t) },
   ], x, y)
 }
 
@@ -1079,6 +1082,46 @@ function TagModal(props: { task: Task; onClose(): void }) {
   )
 }
 
+/** 删除确认：防误删，确认后仍可从底部「撤销」恢复 */
+function DeleteModal(props: { task: Task; onClose(): void }) {
+  const liveTask = createMemo(() => S.tasks().find((x) => x.id === props.task.id) ?? props.task)
+  let delBtn!: HTMLButtonElement
+
+  const confirm = () => {
+    S.deleteTask(props.task.id)
+    toast('已删除', '删除')
+    props.onClose()
+  }
+
+  onMount(() => {
+    queueMicrotask(() => delBtn?.focus())
+    // 捕获阶段拦截 Esc：优先关闭确认框，避免触发全局「收进侧边栏」
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation()
+        e.preventDefault()
+        props.onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    onCleanup(() => window.removeEventListener('keydown', onKey, true))
+  })
+
+  return (
+    <div class="confirm-overlay" onClick={() => props.onClose()}>
+      <div class="confirm-card" onClick={(e) => e.stopPropagation()}>
+        <div class="confirm-title">删除这条事项？</div>
+        <div class="confirm-task">{liveTask().t}</div>
+        <div class="confirm-hint">删除后可在底部提示条点「撤销」找回</div>
+        <div class="confirm-acts">
+          <button class="confirm-cancel" onClick={() => props.onClose()}>取消</button>
+          <button ref={delBtn} class="confirm-del" onClick={confirm}>删除</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ---------------- 主界面 ----------------
 
 export function MainApp() {
@@ -1162,7 +1205,9 @@ export function MainApp() {
   exportSearchToggle = toggleSearch
 
   const footStats = createMemo(() => {
-    const list = S.tasks().filter((t) => t.list === currentList())
+    // 只统计「当前清单里可见」的事项：次日归档的完成项不计入，保证与列表行数一致
+    const today = startOfToday()
+    const list = S.tasks().filter((t) => t.list === currentList() && !S.isStaleDone(t, today))
     const done = list.filter((t) => t.d).length
     const susp = list.filter((t) => !t.d && t.susp).length
     return { total: list.length, done, susp, pending: list.length - done - susp }
@@ -1381,7 +1426,7 @@ export function MainApp() {
               <span class="foot-stat">
                 {view() === 'history'
                   ? `${historySelLabel()} · 完成 ${visibleIds().length} 项`
-                  : `共 ${footStats().total} 项 · 待办 ${footStats().pending}${footStats().susp ? ` · 挂起 ${footStats().susp}` : ''}`}
+                  : `共 ${footStats().total} 项 · 待办 ${footStats().pending}${footStats().susp ? ` · 挂起 ${footStats().susp}` : ''}${footStats().done ? ` · 已完成 ${footStats().done}` : ''}`}
               </span>
               <span class="foot-right">
                 <Show when={view() === 'history'}>
@@ -1449,6 +1494,10 @@ export function MainApp() {
           {/* 事项标签管理弹窗 */}
           <Show when={tagModalTask()}>
             <TagModal task={tagModalTask()!} onClose={() => setTagModalTask(null)} />
+          </Show>
+          {/* 删除确认弹窗 */}
+          <Show when={deleteConfirmTask()}>
+            <DeleteModal task={deleteConfirmTask()!} onClose={() => setDeleteConfirmTask(null)} />
           </Show>
         </div>
 
