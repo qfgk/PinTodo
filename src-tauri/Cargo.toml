@@ -1,6 +1,6 @@
 [package]
 name = "todo"
-version = "1.0.0"
+version = "1.0.2"
 description = "PinTodo — 常驻桌面待办清单"
 edition = "2021"
 
@@ -20,6 +20,8 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 winreg = "0.52"
+# 自动更新：访问 GitHub Releases API 与下载安装包（Windows 走 schannel，无需额外系统依赖）
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 
 # 体积优化：https://tauri.app/concept/size/
 [profile.release]

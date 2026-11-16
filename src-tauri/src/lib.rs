@@ -3,6 +3,7 @@ mod commands;
 mod data;
 mod desktop_monitor;
 mod hotkey;
+mod updater;
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -68,6 +69,7 @@ pub fn run() {
             mark(&mut log, "s_key");
             data::spawn_reminder_loop(app.handle().clone());
             desktop_monitor::start_desktop_monitor(app.handle().clone());
+            updater::cleanup_old_exe();
             mark(&mut log, "setup");
             Ok(())
         })
@@ -88,6 +90,10 @@ pub fn run() {
             commands::read_text,
             commands::load_scratchpad,
             commands::save_scratchpad,
+            updater::app_version,
+            updater::check_update,
+            updater::download_update,
+            updater::install_update,
             commands::quit
         ]);
     #[cfg(windows)]

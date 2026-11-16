@@ -17,6 +17,7 @@ import {
 } from './ui'
 import { initTheme, currentMode, setTheme } from './theme'
 import { toggleStats } from './stats'
+import { checkUpdates } from './update'
 import { popupMenu, closeMenus, type MenuEntry } from './menus'
 import { h } from './icons'
 
@@ -94,6 +95,11 @@ export async function boot() {
   wireWindowEvents()
   await wireTauriEvents()
   bootedDone = true
+
+  // 启动后静默检查更新（可在 ··· 菜单关闭）；延迟到首帧稳定后再请求网络
+  if (st.settings.autoUpdate !== false) {
+    window.setTimeout(() => { void checkUpdates(false) }, 4000)
+  }
 }
 
 function setTopmost(v: boolean) {
@@ -378,6 +384,12 @@ function mainMenu(x: number, y: number) {
       },
     },
     { sep: true },
+    { label: '检查更新…', action: () => { void checkUpdates(true) } },
+    {
+      label: '启动时自动检查更新',
+      checked: S.settings().autoUpdate !== false,
+      action: () => S.patchSettings({ autoUpdate: !(S.settings().autoUpdate !== false) }),
+    },
     { label: '快捷键与语法', action: () => setHelpOpen(true) },
     { label: '隐藏到侧边', action: () => W.hideToEdge(W.currentSide()) },
     { label: '退出 PinTodo', danger: true, action: () => invoke('quit') },
