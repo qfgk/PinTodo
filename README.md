@@ -93,6 +93,9 @@ node tests/repro-wind.mjs   # 真实 Win+D / 挂起态验证（Windows）
 | `scratchpad.txt` | 随手记内容 |
 | `backup/` | 每次启动自动备份（保留最近 7 份） |
 
+## 友情链接
+LINUX DO —— 真诚分享、友好讨论的技术社区，本项目的交流与反馈也发布于此
+
 ## 许可
 
 [MIT](LICENSE)
