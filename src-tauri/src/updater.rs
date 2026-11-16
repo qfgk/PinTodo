@@ -3,11 +3,10 @@
 //! 流程：
 //!   1. `check_update` 拉取 `releases/latest`，语义化版本比较后返回更新信息；
 //!   2. `download_update` 只允许 GitHub 域名，下载到临时目录并做基础校验（MZ 头）；
-//!   3. `install_update` 写一个批处理：退出后把旧 exe 改名为 .old、放入新 exe、拉起新进程。
+//!   3. `install_update` 改名运行中的 exe，复制新版本并分离式重启。
 //!      下次启动时 `cleanup_old_exe` 删掉 .old。
 
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 
 /// 仓库地址：可在发布新版本时直接改这里
 const REPO: &str = "qfgk/PinTodo";
@@ -150,45 +149,121 @@ pub async fn download_update(url: String, version: String) -> Result<String, Str
     Ok(path.to_string_lossy().to_string())
 }
 
-/// 应用更新：退出当前进程，由批处理替换 exe 并重启
+/// 应用更新：启动独立 PowerShell 助手；助手等待旧进程退出后替换 exe 并重启。
+/// 参数使用 Command::args 分项传递，脚本内容固定，不拼接 shell 命令字符串。
 #[tauri::command]
 pub fn install_update(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("定位当前程序失败：{e}"))?;
-    let old = exe.with_extension("exe.old");
-    if !std::path::Path::new(&path).exists() {
+    let new = std::path::PathBuf::from(&path);
+    if !new.exists() {
         return Err("更新包不存在，请重新下载".into());
     }
-
-    let bat = std::env::temp_dir().join("pintodo-apply-update.bat");
-    // 2 秒后旧进程已退出：改名旧 exe → 放入新 exe → 拉起新进程 → 自删批处理
-    let script = format!(
-        "@echo off\r\nchcp 65001 >nul\r\ntimeout /t 2 /nobreak >nul\r\n\
-         move /Y \"{exe}\" \"{old}\" >nul 2>nul\r\n\
-         copy /Y \"{new}\" \"{exe}\" >nul\r\n\
-         start \"\" \"{exe}\"\r\n\
-         del \"%~f0\"\r\n",
-        exe = exe.display(),
-        old = old.display(),
-        new = path
-    );
-    {
-        let mut f = std::fs::File::create(&bat).map_err(|e| format!("写入更新脚本失败：{e}"))?;
-        f.write_all(script.as_bytes())
-            .map_err(|e| format!("写入更新脚本失败：{e}"))?;
+    // 更新包必须位于我们自己的临时下载目录且命名符合约定，拒绝任意路径。
+    let valid_dir = new
+        .parent()
+        .map(|p| p.file_name().map(|n| n == "PinTodo-update").unwrap_or(false))
+        .unwrap_or(false);
+    let valid_name = new
+        .file_name()
+        .map(|n| {
+            let s = n.to_string_lossy();
+            s.starts_with("PinTodo-") && s.to_lowercase().ends_with(".exe")
+        })
+        .unwrap_or(false);
+    if !valid_dir || !valid_name {
+        return Err("更新包路径不合法".into());
     }
+
+    let old = exe.with_extension("exe.old");
+    if old.exists() {
+        let _ = std::fs::remove_file(&old); // 上次更新的残留
+    }
+
+    // 首选原位替换：若 Windows 允许改名当前映像，Tauri 会在旧进程退出后重启新 exe。
+    if std::fs::rename(&exe, &old).is_ok() {
+        match std::fs::copy(&new, &exe) {
+            Ok(_) => {
+                app.request_restart();
+                return Ok(());
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&exe);
+                let _ = std::fs::rename(&old, &exe);
+                return Err(format!("写入新版本失败，已恢复旧版：{e}"));
+            }
+        }
+    }
+
+    // 若当前 exe 被系统/杀软锁定，则用独立 PowerShell 助手等待文件句柄释放后替换。
+    let pid = std::process::id().to_string();
+    let script = std::env::temp_dir().join(format!("pintodo-update-{pid}.ps1"));
+    const SCRIPT: &str = r#"
+param([int]$TargetProcessId, [string]$ExePath, [string]$NewPath, [string]$OldPath)
+$ErrorActionPreference = 'Stop'
+$LogPath = Join-Path $env:TEMP 'pintodo-update-helper.log'
+function Write-Log([string]$Message) {
+  Add-Content -LiteralPath $LogPath -Value ((Get-Date -Format o) + ' ' + $Message)
+}
+try {
+  Write-Log ('helper started pid=' + $PID + ' target=' + $TargetProcessId)
+  Wait-Process -Id $TargetProcessId -Timeout 30 -ErrorAction Stop
+  Write-Log 'old process exited'
+  Start-Sleep -Milliseconds 300
+  $moved = $false
+  for ($i = 0; $i -lt 40; $i++) {
+    try {
+      Move-Item -LiteralPath $ExePath -Destination $OldPath -Force -ErrorAction Stop
+      $moved = $true
+      break
+    } catch { Start-Sleep -Milliseconds 250 }
+  }
+  if (-not $moved) { throw 'Unable to move old executable after retries' }
+  Write-Log 'old exe moved'
+  Copy-Item -LiteralPath $NewPath -Destination $ExePath -Force -ErrorAction Stop
+  Write-Log 'new exe copied'
+  Start-Process -FilePath $ExePath -ErrorAction Stop
+  Write-Log 'new exe started'
+} catch {
+  Write-Log ('ERROR: ' + $_.ToString())
+  if ((Test-Path -LiteralPath $OldPath) -and -not (Test-Path -LiteralPath $ExePath)) {
+    Move-Item -LiteralPath $OldPath -Destination $ExePath -Force -ErrorAction SilentlyContinue
+    Write-Log 'rollback attempted'
+  }
+  exit 1
+}
+"#;
+    std::fs::write(&script, SCRIPT).map_err(|e| format!("写入更新助手失败：{e}"))?;
 
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .arg("/C")
-            .arg(format!("start \"\" /min \"{}\"", bat.display()))
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("启动更新脚本失败：{e}"))?;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        let spawn_helper = |flags| {
+            std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&script)
+                .arg(&pid)
+                .arg(&exe)
+                .arg(&new)
+                .arg(&old)
+                .creation_flags(flags)
+                .spawn()
+        };
+        // 若父进程位于不允许 breakaway 的 job object 中，回退到普通 detached 子进程。
+        spawn_helper(DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+            .or_else(|_| spawn_helper(DETACHED_PROCESS | CREATE_NO_WINDOW))
+            .map_err(|e| format!("启动更新助手失败：{e}"))?;
     }
 
+    // 助手独立等待此进程退出，避免与 single-instance 插件竞争。
     app.exit(0);
     Ok(())
 }
@@ -198,5 +273,20 @@ pub fn cleanup_old_exe() {
     if let Ok(exe) = std::env::current_exe() {
         let old = exe.with_extension("exe.old");
         let _ = std::fs::remove_file(old);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ver;
+
+    #[test]
+    fn version_compare_semantic() {
+        assert!(parse_ver("v1.0.2") > parse_ver("1.0.1"));
+        assert!(parse_ver("V1.1.0") > parse_ver("v1.0.9"));
+        assert!(parse_ver("1.2.0") > parse_ver("1.1.99"));
+        assert_eq!(parse_ver("v1.0.2"), parse_ver("1.0.2"));
+        assert_eq!(parse_ver("1.0"), (1, 0, 0));
+        assert!(parse_ver("v1.0.2-beta") >= parse_ver("1.0.2"));
     }
 }
