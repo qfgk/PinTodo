@@ -13,6 +13,7 @@ import {
   setCurrentList, setView, allLists, currentList, view, searchOpen,
   selId, setSelId, exportSearchToggle, helpOpen, setHelpOpen,
   progModalTask, setProgModalTask, deleteConfirmTask, setDeleteConfirmTask,
+  trashOpen, setTrashOpen, openTrash,
 } from './ui'
 import { initTheme, currentMode, setTheme } from './theme'
 import { toggleStats } from './stats'
@@ -32,6 +33,11 @@ export async function boot() {
   const st = await invoke<{ tasks: Task[]; settings: Record<string, any> }>('load_state')
   S.setAll(st.tasks, st.settings)
   topmost = st.settings.topmost !== false
+
+  // 回收站：加载并执行自动清理规则（默认保留 30 天，0=永不清理）
+  await S.loadTrashFromDisk()
+  const trashDays = typeof st.settings.trashDays === 'number' ? st.settings.trashDays : S.DEFAULT_TRASH_DAYS
+  S.purgeExpiredTrash(trashDays)
 
   const w = clampNum(st.settings.w ?? 322, 280, 560)
   const hh = clampNum(st.settings.h ?? 480, W.MIN_H, W.MAX_H)
@@ -194,7 +200,8 @@ function wireKeyboard() {
       return
     }
     if (e.key === 'Escape') {
-      if (deleteConfirmTask()) setDeleteConfirmTask(null)
+      if (trashOpen()) setTrashOpen(false)
+      else if (deleteConfirmTask()) setDeleteConfirmTask(null)
       else if (progModalTask()) setProgModalTask(null)
       else if (helpOpen()) setHelpOpen(false)
       else if (searchOpen()) exportSearchToggle(false)
@@ -217,8 +224,9 @@ function wireKeyboard() {
       }
     } else if (e.key === 'Delete') {
       if (idx >= 0) {
-        S.deleteTask(vis[idx].id)
-        toast('已删除', '删除')
+        e.preventDefault()
+        // 与行内 × 一致：先弹确认框，确认后进回收站
+        setDeleteConfirmTask(vis[idx])
       }
     }
   })
@@ -355,6 +363,7 @@ function mainMenu(x: number, y: number) {
     { label: '主题：深色', radio: true, checked: currentMode() === 'dark', action: () => setTheme('dark') },
     { sep: true },
     { label: '统计', action: () => toggleStats() },
+    { label: '回收站…', action: () => openTrash() },
     { label: '导出 JSON 备份', action: exportJson },
     { label: '导入 JSON', action: importJson },
     { label: '导出 todo.txt', action: exportTodoTxt },

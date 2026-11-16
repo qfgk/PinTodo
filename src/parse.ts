@@ -79,13 +79,19 @@ export function extractDue(raw: string): {
   }
 
   if (due === null) {
-    // 月底（默认 18:00；当天月底且已过 18 点 → 下个月底）
-    const me = eat(/月底|月末/)
+    // 月底 / 这个月底 / 本月底 / 下个月底 [+之前/以前/前]（默认 18:00；当天月底且已过 18 点 → 下个月底）
+    // 注：必须连同「这个/本/下个」前缀一起吃掉，否则会残留「这」「这个」等字样
+    const me = eat(/(?:(下个|下|这个|这|本)(?:个)?)?(?:月底|月末)(?:之前|以前|前(?!天))?/)
     if (me) {
-      const eom = (base: Date) => new Date(base.getFullYear(), base.getMonth() + 1, 0, 18, 0)
-      let t = eom(now).getTime()
-      if (t <= now.getTime()) t = eom(new Date(now.getFullYear(), now.getMonth() + 2, 0)).getTime()
-      due = t
+      const eom = (y: number, m: number) => new Date(y, m + 1, 0, 18, 0).getTime()
+      if (me.startsWith('下')) {
+        // 下个月底：本月 +1 的最后一天
+        due = eom(now.getFullYear(), now.getMonth() + 1)
+      } else {
+        let t = eom(now.getFullYear(), now.getMonth())
+        if (t <= now.getTime()) t = eom(now.getFullYear(), now.getMonth() + 1)
+        due = t
+      }
     }
   }
 

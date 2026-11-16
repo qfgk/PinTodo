@@ -96,10 +96,14 @@ async function main() {
   mkdirSync(dirname(OUT), { recursive: true })
   const origTasks = existsSync(TASKS_JSON) ? readFileSync(TASKS_JSON, 'utf-8') : null
   const origSettings = existsSync(SETTINGS_JSON) ? readFileSync(SETTINGS_JSON, 'utf-8') : null
+  const TRASH_JSON = join(DATA_DIR, 'trash.json')
+  const origTrash = existsSync(TRASH_JSON) ? readFileSync(TRASH_JSON, 'utf-8') : null
   const restore = () => {
     try {
       if (origTasks !== null) writeFileSync(TASKS_JSON, origTasks)
       if (origSettings !== null) writeFileSync(SETTINGS_JSON, origSettings)
+      // 保护用户回收站不被启动时自动清理
+      if (origTrash !== null) writeFileSync(TRASH_JSON, origTrash)
     } catch {}
   }
 

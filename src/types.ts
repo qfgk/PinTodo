@@ -30,6 +30,13 @@ export interface Task {
 
 export type ThemeMode = 'auto' | 'light' | 'dark'
 export type Chip = 'all' | 'todo' | 'done' | 'today' | 'overdue' | 'star'
+
+/** 回收站条目：删除的任务快照 + 删除时间 */
+export interface TrashItem {
+  id: string
+  deletedAt: number
+  task: Task
+}
 /** 主界面视图：清单（含时间分类折叠） / 随手记 / 历史日历 */
 export type ViewMode = 'list' | 'note' | 'history'
 

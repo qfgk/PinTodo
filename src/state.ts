@@ -1,11 +1,13 @@
 // 状态层（Solid signals）：唯一数据源 + 防抖持久化 + 撤销栈
 import { createSignal } from 'solid-js'
 import { invoke } from '@tauri-apps/api/core'
-import type { Task } from './types'
+import type { Task, TrashItem } from './types'
 
 const [tasks, setTasks] = createSignal<Task[]>([])
 const [settings, setSettings] = createSignal<Record<string, any>>({})
-export { tasks, settings }
+/** 回收站（删除的任务快照），独立于 tasks 持久化到 trash.json */
+const [trash, setTrash] = createSignal<TrashItem[]>([])
+export { tasks, settings, trash }
 
 let seq = 1
 const undoStack: Task[][] = []
@@ -49,6 +51,12 @@ export function canUndo() {
 }
 
 export function undo(): boolean {
+  // 刚删除的任务：Ctrl+Z 优先从回收站恢复
+  if (lastDeletedTrashId) {
+    const tid = lastDeletedTrashId
+    lastDeletedTrashId = null
+    return restoreTrash(tid)
+  }
   const snap = undoStack.pop()
   if (!snap) return false
   setTasks(snap)
@@ -117,8 +125,78 @@ export function toggleTask(id: string) {
   })
 }
 
-export function deleteTask(id: string) {
-  withTasks((cur) => cur.filter((t) => t.id !== id))
+export function deleteTask(id: string): string | null {
+  const cur = tasks()
+  const target = cur.find((t) => t.id === id)
+  if (!target) return null
+  const next = cur.filter((t) => t.id !== id)
+  // 删除不再进撤销栈：进入回收站，撤销也走回收站恢复
+  commit(next)
+  const item: TrashItem = { id: newId(), deletedAt: Date.now(), task: structuredClone(target) }
+  saveTrash([item, ...trash()])
+  lastDeletedTrashId = item.id
+  return item.id
+}
+
+// ---------------- 回收站 ----------------
+
+/** 默认自动清理天数（0=永不） */
+export const DEFAULT_TRASH_DAYS = 30
+let lastDeletedTrashId: string | null = null
+
+function saveTrash(next: TrashItem[]) {
+  setTrash(next)
+  try {
+    invoke('save_trash', { items: next }).catch(() => {})
+  } catch {}
+}
+
+/** 启动时从磁盘加载回收站 */
+export async function loadTrashFromDisk(): Promise<TrashItem[]> {
+  try {
+    const items = await invoke<TrashItem[]>('load_trash')
+    if (Array.isArray(items)) setTrash(items)
+    return Array.isArray(items) ? items : []
+  } catch {
+    return []
+  }
+}
+
+/** 按规则清理过期的回收站条目；days<=0 表示永不清理。返回清理条数 */
+export function purgeExpiredTrash(days: number): number {
+  if (!days || days <= 0) return 0
+  const cutoff = Date.now() - days * 86400000
+  const cur = trash()
+  const keep = cur.filter((x) => x.deletedAt >= cutoff)
+  const removed = cur.length - keep.length
+  if (removed > 0) saveTrash(keep)
+  return removed
+}
+
+/** 从回收站恢复任务到原清单 */
+export function restoreTrash(trashId: string): boolean {
+  const items = trash()
+  const item = items.find((x) => x.id === trashId)
+  if (!item) return false
+  const exists = tasks().some((x) => x.id === item.task.id)
+  const restored: Task = exists ? { ...item.task, id: newId() } : { ...item.task }
+  commit([restored, ...tasks()])
+  saveTrash(items.filter((x) => x.id !== trashId))
+  if (lastDeletedTrashId === trashId) lastDeletedTrashId = null
+  return true
+}
+
+/** 彻底删除单条 */
+export function purgeTrashItem(trashId: string) {
+  saveTrash(trash().filter((x) => x.id !== trashId))
+  if (lastDeletedTrashId === trashId) lastDeletedTrashId = null
+}
+
+/** 清空回收站 */
+export function clearTrash() {
+  if (!trash().length) return
+  saveTrash([])
+  lastDeletedTrashId = null
 }
 
 export function editTask(id: string, text: string) {

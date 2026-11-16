@@ -75,6 +75,8 @@ pub fn run() {
             commands::load_state,
             commands::save_tasks,
             commands::save_settings,
+            commands::load_trash,
+            commands::save_trash,
             commands::get_autostart,
             commands::set_autostart,
             commands::apply_theme,

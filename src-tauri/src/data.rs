@@ -27,6 +27,10 @@ fn settings_path() -> PathBuf {
     data_dir().join("settings.json")
 }
 
+fn trash_path() -> PathBuf {
+    data_dir().join("trash.json")
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -151,6 +155,29 @@ pub fn migrate_task(mut v: Value) -> Task {
 pub enum SaveReq {
     Tasks(Vec<Task>),
     Settings(Value),
+}
+
+/// 回收站条目：删除的任务快照 + 删除时间
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashItem {
+    pub id: String,
+    #[serde(default)]
+    pub deleted_at: i64,
+    pub task: Task,
+}
+
+pub fn load_trash() -> Vec<TrashItem> {
+    fs::read_to_string(trash_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<TrashItem>>(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_trash(items: &[TrashItem]) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(items) {
+        write_json_atomic(&trash_path(), &bytes);
+    }
 }
 
 pub struct AppState {

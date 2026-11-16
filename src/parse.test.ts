@@ -106,6 +106,35 @@ describe('parseInput', () => {
     expect(d.getDate()).toBe(lastDay)
   })
 
+  it('「这个月底/本月底/下个月底」整体识别，不残留前缀字样', () => {
+    for (const phrase of ['这个月底', '本月底', '这月底', '本月末']) {
+      const { due, rest } = extractDue(`${phrase}对接维保合同`)
+      expect(rest).toBe('对接维保合同')
+      const d = new Date(due!)
+      expect(d.getDate()).toBe(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate())
+      expect([d.getHours(), d.getMinutes()]).toEqual([18, 0])
+    }
+    // 下个月底 → 下个月的月末
+    const { due, rest } = extractDue('下个月底对接维保合同')
+    expect(rest).toBe('对接维保合同')
+    const now = new Date()
+    const d = new Date(due!)
+    expect(d.getDate()).toBe(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate())
+    expect(d.getMonth()).toBe((now.getMonth() + 1) % 12)
+    // 「月底前」也能整体吃掉
+    expect(extractDue('月底前交房租').rest).toBe('交房租')
+    // 普通词语不被误伤
+    expect(extractDue('这个任务明天做').rest).toBe('这个任务 做')
+  })
+
+  it('parseInput：这个月底对接维保合同 → 正文干净且截止为月末', () => {
+    const p = parseInput('这个月底对接维保合同')
+    expect(p.text).toBe('对接维保合同')
+    expect(p.due).not.toBeNull()
+    const d = new Date(p.due!)
+    expect(d.getDate()).toBe(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate())
+  })
+
   it('每周三18点 解析到最近的周三', () => {
     const { due, recur } = extractDue('例会 每周三18点')
     expect(recur).toBe('weekly')
@@ -248,5 +277,19 @@ describe('sortTaskList', () => {
     expect(tasks()[0].t).toBe('t-susp')
     setSusp('t-susp', false)
     expect(tasks()[0].susp).toBe(false)
+  })
+
+  it('月底前缀完整吃掉（这个月底 / 本月底 / 下个月底），不留残字', () => {
+    const p1 = parseInput('这个月底对接维保合同')
+    expect(p1.text).toBe('对接维保合同')
+    const d1 = new Date(p1.due!)
+    const now = new Date()
+    expect(d1.getMonth()).toBe(now.getMonth())
+    expect(d1.getDate()).toBe(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate())
+    expect([d1.getHours(), d1.getMinutes()]).toEqual([18, 0])
+
+    expect(parseInput('本月底交报告').text).toBe('交报告')
+    expect(parseInput('下个月底续费').text).toBe('续费')
+    expect(parseInput('月底交房租').text).toBe('交房租')
   })
 })

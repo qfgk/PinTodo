@@ -1,7 +1,7 @@
 // PinTodo 冒烟测试：CDP 驱动 release exe 走真实用户路径
 // 用法：node tests/smoke.mjs  （需先构建 release）
 import { spawn, execSync } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import os from 'node:os'
 
@@ -85,20 +85,26 @@ async function main() {
     console.error('缺少 release exe，先跑 npx tauri build --no-bundle')
     process.exit(2)
   }
-  // 备份用户真实 tasks.json 和 settings.json，测试结束后还原
+  // 备份用户真实 tasks/settings/scratchpad/trash，测试结束后还原
   mkdirSync(DATA_DIR, { recursive: true })
   const SETTINGS_JSON = join(DATA_DIR, 'settings.json')
   const SCRATCH_TXT = join(DATA_DIR, 'scratchpad.txt')
+  const TRASH_JSON = join(DATA_DIR, 'trash.json')
   const origTasks = existsSync(TASKS_JSON) ? readFileSync(TASKS_JSON, 'utf-8') : null
   const origSettings = existsSync(SETTINGS_JSON) ? readFileSync(SETTINGS_JSON, 'utf-8') : null
   const origScratch = existsSync(SCRATCH_TXT) ? readFileSync(SCRATCH_TXT, 'utf-8') : null
+  const origTrash = existsSync(TRASH_JSON) ? readFileSync(TRASH_JSON, 'utf-8') : null
   const restoreUserFiles = () => {
     try {
       if (origTasks !== null) writeFileSync(TASKS_JSON, origTasks)
       if (origSettings !== null) writeFileSync(SETTINGS_JSON, origSettings)
       if (origScratch !== null) writeFileSync(SCRATCH_TXT, origScratch)
+      if (origTrash !== null) writeFileSync(TRASH_JSON, origTrash)
+      else if (existsSync(TRASH_JSON)) unlinkSync(TRASH_JSON)
     } catch {}
   }
+  // 回收站从空开始，断言才可确定
+  writeFileSync(TRASH_JSON, '[]')
   // 干净的 boot 日志
   writeFileSync(BOOT_LOG, '')
 
@@ -189,6 +195,27 @@ async function main() {
   const priOk = await evalIn(page, `!!document.querySelector('.row .pri-flag.p1')`)
   check('!1 优先级角标渲染', !!priOk)
 
+  // 「这个月底」前缀必须完整吃掉，不能残留「这/这个」
+  await evalIn(page, `(() => {
+    const inp = document.querySelector('.new-input')
+    inp.value = '这个月底对接维保合同'
+    inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    return true
+  })()`)
+  await sleep(300)
+  const monthEndInfo = await evalIn(page, `(() => {
+    const row = [...document.querySelectorAll('.row')].find((r) => (r.querySelector('.txt')?.textContent || '').includes('对接维保合同'))
+    if (!row) return { found: false }
+    const txt = (row.querySelector('.txt')?.textContent || '').trim()
+    const due = row.querySelector('.due')?.textContent?.trim() || ''
+    const d = new Date()
+    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0)
+    const expect = \`\${last.getMonth() + 1}/\${last.getDate()}\`
+    return { found: true, txt, due, expect, ok: txt === '对接维保合同' && due.includes(expect) }
+  })()`)
+  check('「这个月底」解析不残留前缀（文本=对接维保合同，截止=本月最后一天）', !!monthEndInfo.found && monthEndInfo.ok, JSON.stringify(monthEndInfo))
+  const afterExtraRows = await evalIn(page, `document.querySelectorAll('.row').length`)
+
   // ---------- 3. 双击编辑 ----------
   console.log('■ 行内编辑')
   await evalIn(page, `(() => {
@@ -217,7 +244,8 @@ async function main() {
     })()`)
     check('回车提交编辑', !!edited)
     const rowCount = await evalIn(page, `document.querySelectorAll('.row').length`)
-    check('编辑后列表完整（不截断）', rowCount === afterRows, `${rowCount}`)
+    const diagRows = await evalIn(page, `[...document.querySelectorAll('.row .txt')].map((e) => (e.textContent || '').trim().slice(0, 16))`)
+    check('编辑后列表完整（不截断）', rowCount === afterExtraRows, `${afterExtraRows}→${rowCount} rows=${JSON.stringify(diagRows)}`)
   }
 
   // ---------- 3.5 描述持续输入不失焦（回归此前打字断焦 bug） ----------
@@ -325,6 +353,33 @@ async function main() {
   await sleep(250)
   const backToList = await evalIn(page, `!document.querySelector('.scratch')`)
   check('随手记 Esc 立即保存并返回清单', backToList)
+
+  // 随手记 → 转为待办：月底短语整体识别（不残留「这/这个」）
+  await evalIn(page, `(() => {
+    const tabs = [...document.querySelectorAll('.seg-tabs .seg')]
+    tabs.find((b) => b.textContent?.includes('随手记'))?.click()
+    return true
+  })()`)
+  await sleep(200)
+  await evalIn(page, `(() => {
+    const sc = document.querySelector('.scratch')
+    sc.value = '这个月底对接维保合同'
+    sc.dispatchEvent(new Event('input', { bubbles: true }))
+    document.querySelector('.note-convert')?.click()
+    return true
+  })()`)
+  await sleep(450)
+  const converted = await evalIn(page, `(() => {
+    const rows = [...document.querySelectorAll('.row')]
+    const hit = rows.find((r) => (r.querySelector('.txt')?.textContent || '').trim() === '对接维保合同')
+    return {
+      exists: !!hit,
+      dueOk: !!hit?.querySelector('.due'),
+      dueText: hit?.querySelector('.due')?.textContent || '',
+      noResidue: !rows.some((r) => (r.querySelector('.txt')?.textContent || '').includes('这 对接')),
+    }
+  })()`)
+  check('随手记「这个月底…」转待办：标题干净且带截止日期', converted.exists && converted.dueOk && converted.noResidue, JSON.stringify(converted))
 
   // ---------- 3.95 任务进度弹窗打卡与历程展示 + 历史日历视图 ----------
   console.log('■ 任务进度与历史日历')
@@ -558,6 +613,75 @@ async function main() {
     return { stat: m ? Number(m[1]) : null, rows: document.querySelectorAll('.row').length }
   })()`)
   check('删除后统计与行数仍一致', statAfter.stat !== null && statAfter.stat === statAfter.rows, JSON.stringify(statAfter))
+
+  // ---------- 6.9 回收站：恢复 / 彻底删除 / 自动清理规则 ----------
+  console.log('■ 回收站')
+  // 刚删除的任务应已在回收站里（trash.json 由应用写入）
+  const trashFile1 = JSON.parse(readFileSync(TRASH_JSON, 'utf-8'))
+  check('删除的任务写入回收站 trash.json', trashFile1.some((x) => (x.task?.t || '').includes('删除确认测试任务')), `trash=${trashFile1.length}`)
+
+  // 打开回收站面板
+  await evalIn(page, `document.querySelector('.foot-trash')?.click()`)
+  await sleep(300)
+  const trashOpenInfo = await evalIn(page, `({
+    open: !!document.querySelector('.trash-card'),
+    hasItem: [...document.querySelectorAll('.trash-item-title')].some((e) => (e.textContent || '').includes('删除确认测试任务')),
+    hasRule: !!document.querySelector('.trash-rule-opt.on'),
+  })`)
+  check('页脚入口打开回收站并列出已删任务', trashOpenInfo.open && trashOpenInfo.hasItem && trashOpenInfo.hasRule, JSON.stringify(trashOpenInfo))
+
+  // 恢复
+  await evalIn(page, `(() => {
+    const item = [...document.querySelectorAll('.trash-item')].find((el) => (el.querySelector('.trash-item-title')?.textContent || '').includes('删除确认测试任务'))
+    item?.querySelector('.trash-restore')?.click()
+    return true
+  })()`)
+  await sleep(350)
+  const restoredInfo = await evalIn(page, `({
+    rowBack: [...document.querySelectorAll('.row')].some((r) => (r.querySelector('.txt')?.textContent || '').includes('删除确认测试任务')),
+    itemGone: ![...document.querySelectorAll('.trash-item-title')].some((e) => (e.textContent || '').includes('删除确认测试任务')),
+  })`)
+  check('从回收站恢复任务回到清单', restoredInfo.rowBack && restoredInfo.itemGone, JSON.stringify(restoredInfo))
+
+  // 再删一次 → 彻底删除
+  await evalIn(page, `document.querySelector('.trash-head .ib')?.click()`)
+  await sleep(200)
+  await evalIn(page, `(() => {
+    const rows = [...document.querySelectorAll('.row')]
+    const hit = rows.find((r) => (r.querySelector('.txt')?.textContent || '').includes('删除确认测试任务'))
+    hit?.querySelector('.del')?.click()
+    return true
+  })()`)
+  await sleep(150)
+  await evalIn(page, `document.querySelector('.confirm-del')?.click()`)
+  await sleep(300)
+  await evalIn(page, `document.querySelector('.foot-trash')?.click()`)
+  await sleep(300)
+  await evalIn(page, `(() => {
+    const item = [...document.querySelectorAll('.trash-item')].find((el) => (el.querySelector('.trash-item-title')?.textContent || '').includes('删除确认测试任务'))
+    item?.querySelector('.trash-purge')?.click()
+    return true
+  })()`)
+  await sleep(300)
+  const purgedInfo = await evalIn(page, `({
+    empty: !!document.querySelector('.trash-empty'),
+    itemGone: ![...document.querySelectorAll('.trash-item-title')].some((e) => (e.textContent || '').includes('删除确认测试任务')),
+  })`)
+  check('回收站内彻底删除生效', purgedInfo.empty && purgedInfo.itemGone, JSON.stringify(purgedInfo))
+
+  // 自动清理规则：点「7天」后该选项选中
+  await evalIn(page, `[...document.querySelectorAll('.trash-rule-opt')].find((b) => (b.textContent || '').trim() === '7天')?.click()`)
+  await sleep(250)
+  const ruleInfo = await evalIn(page, `(() => {
+    const on = document.querySelector('.trash-rule-opt.on')
+    return { on: (on?.textContent || '').trim(), toast: document.querySelector('.toast')?.textContent || '' }
+  })()`)
+  check('自动清理规则可设置（7天）', ruleInfo.on === '7天' && ruleInfo.toast.includes('7'), JSON.stringify(ruleInfo))
+  await evalIn(page, `document.querySelector('.trash-head .ib')?.click()`)
+  await sleep(200)
+  // 设置持久化到 settings.json
+  const settingsNow = JSON.parse(readFileSync(SETTINGS_JSON, 'utf-8'))
+  check('自动清理规则写入 settings.json', settingsNow.trashDays === 7, `trashDays=${settingsNow.trashDays}`)
 
   // ---------- 7. 贴边隐藏 / 唤回 ----------
   console.log('■ 贴边循环')

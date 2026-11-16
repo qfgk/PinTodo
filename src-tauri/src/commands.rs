@@ -13,6 +13,16 @@ pub fn load_state(state: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
+pub fn load_trash() -> Vec<data::TrashItem> {
+    data::load_trash()
+}
+
+#[tauri::command]
+pub fn save_trash(items: Vec<data::TrashItem>) {
+    data::save_trash(&items);
+}
+
+#[tauri::command]
 pub fn save_tasks(tasks: Vec<Task>, state: State<'_, AppState>, app: AppHandle) {
     // 托盘提示同步今日待办数（在 move 之前计算）
     let today = chrono_like_today() + 86_400_000;

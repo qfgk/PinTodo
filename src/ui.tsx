@@ -26,6 +26,8 @@ const [progModalTask, setProgModalTask] = createSignal<Task | null>(null)
 const [tagModalTask, setTagModalTask] = createSignal<Task | null>(null)
 /** 删除确认弹窗（行内 × 与右键菜单共用） */
 const [deleteConfirmTask, setDeleteConfirmTask] = createSignal<Task | null>(null)
+/** 回收站面板 */
+const [trashOpen, setTrashOpen] = createSignal(false)
 /** 历史视图：选中的日期（当日 0 点）与月份锚点 */
 const [historySel, setHistorySel] = createSignal<number | null>(null)
 const [historyMonth, setHistoryMonth] = createSignal<{ y: number; m: number } | null>(null)
@@ -46,7 +48,7 @@ export {
   query, setQuery, searchOpen, setSearchOpen, selId, setSelId,
   helpOpen, setHelpOpen, historySel, setHistorySel, historyMonth, setHistoryMonth,
   progModalTask, setProgModalTask, tagModalTask, setTagModalTask,
-  deleteConfirmTask, setDeleteConfirmTask,
+  deleteConfirmTask, setDeleteConfirmTask, trashOpen, setTrashOpen,
   collapsedGroups, setCollapsedGroups,
 }
 
@@ -1088,8 +1090,10 @@ function DeleteModal(props: { task: Task; onClose(): void }) {
   let delBtn!: HTMLButtonElement
 
   const confirm = () => {
-    S.deleteTask(props.task.id)
-    toast('已删除', '删除')
+    const trashId = S.deleteTask(props.task.id)
+    if (trashId) {
+      toast('已移入回收站', undefined, [{ label: '撤销', onClick: () => S.restoreTrash(trashId) }])
+    }
     props.onClose()
   }
 
@@ -1112,10 +1116,132 @@ function DeleteModal(props: { task: Task; onClose(): void }) {
       <div class="confirm-card" onClick={(e) => e.stopPropagation()}>
         <div class="confirm-title">删除这条事项？</div>
         <div class="confirm-task">{liveTask().t}</div>
-        <div class="confirm-hint">删除后可在底部提示条点「撤销」找回</div>
+        <div class="confirm-hint">删除后先放入回收站，可从底部「撤销」或回收站找回</div>
         <div class="confirm-acts">
           <button class="confirm-cancel" onClick={() => props.onClose()}>取消</button>
           <button ref={delBtn} class="confirm-del" onClick={confirm}>删除</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---------------- 回收站 ----------------
+
+function formatTrashTime(ts: number): string {
+  const d = new Date(ts)
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  if (d.toDateString() === now.toDateString()) return `今天 ${hm}`
+  const y = new Date(now)
+  y.setDate(y.getDate() - 1)
+  if (d.toDateString() === y.toDateString()) return `昨天 ${hm}`
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
+}
+
+/** 打开回收站（顺带按当前规则清理过期条目） */
+export function openTrash() {
+  const days = typeof S.settings().trashDays === 'number' ? S.settings().trashDays : S.DEFAULT_TRASH_DAYS
+  S.purgeExpiredTrash(days)
+  setTrashOpen(true)
+}
+
+function TrashPanel() {
+  const [confirmClear, setConfirmClear] = createSignal(false)
+  let clearTimer = 0
+  const days = () => (typeof S.settings().trashDays === 'number' ? S.settings().trashDays : S.DEFAULT_TRASH_DAYS)
+
+  const setRule = (n: number) => {
+    S.patchSettings({ trashDays: n })
+    const removed = S.purgeExpiredTrash(n)
+    toast(n === 0 ? '已关闭自动清理' : `已设为保留 ${n} 天${removed ? `，清理了 ${removed} 条` : ''}`)
+  }
+
+  const onClear = () => {
+    if (!confirmClear()) {
+      setConfirmClear(true)
+      clearTimeout(clearTimer)
+      clearTimer = window.setTimeout(() => setConfirmClear(false), 3000)
+      return
+    }
+    clearTimeout(clearTimer)
+    setConfirmClear(false)
+    S.clearTrash()
+    toast('回收站已清空')
+  }
+  onCleanup(() => clearTimeout(clearTimer))
+
+  return (
+    <div class="trash-overlay" onClick={() => setTrashOpen(false)}>
+      <div class="trash-card" onClick={(e) => e.stopPropagation()}>
+        <div class="trash-head">
+          <div class="trash-title">
+            <span class="trash-title-ico" innerHTML={SVG.trash} />
+            回收站
+          </div>
+          <button class="ib" title="关闭 (Esc)" onClick={() => setTrashOpen(false)} innerHTML={SVG.close} />
+        </div>
+
+        <div class="trash-rule">
+          <span class="trash-rule-label">自动清理</span>
+          <div class="trash-rule-opts">
+            <For each={[7, 30, 90, 0]}>
+              {(n) => (
+                <button class="trash-rule-opt" classList={{ on: days() === n }} onClick={() => setRule(n)}>
+                  {n === 0 ? '永不' : `${n}天`}
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+
+        <div class="trash-list">
+          <Show
+            when={S.trash().length > 0}
+            fallback={<div class="trash-empty">回收站是空的</div>}
+          >
+            <For each={S.trash()}>
+              {(it) => (
+                <div class="trash-item">
+                  <div class="trash-item-main">
+                    <div class="trash-item-title">{it.task.t}</div>
+                    <div class="trash-item-meta">
+                      {it.task.list} · {formatTrashTime(it.deletedAt)} 删除
+                    </div>
+                  </div>
+                  <div class="trash-item-acts">
+                    <button
+                      class="trash-restore"
+                      title="恢复到原清单"
+                      onClick={() => {
+                        S.restoreTrash(it.id)
+                        toast('已恢复到清单')
+                      }}
+                    >
+                      恢复
+                    </button>
+                    <button
+                      class="trash-purge"
+                      title="彻底删除（不可恢复）"
+                      onClick={() => {
+                        S.purgeTrashItem(it.id)
+                        toast('已彻底删除')
+                      }}
+                      innerHTML={SVG.close}
+                    />
+                  </div>
+                </div>
+              )}
+            </For>
+          </Show>
+        </div>
+
+        <div class="trash-foot">
+          <button class="trash-clear" classList={{ armed: confirmClear() }} onClick={onClear}>
+            {confirmClear() ? '再点一次确认清空' : '清空回收站'}
+          </button>
+          <span class="trash-hint">恢复后回到原清单</span>
         </div>
       </div>
     </div>
@@ -1454,6 +1580,7 @@ export function MainApp() {
                     删除该日记录
                   </button>
                 </Show>
+                <button class="ib foot-trash" title="回收站" onClick={() => openTrash()} innerHTML={SVG.trash} />
                 <button class="ib foot-help" title="快捷键与语法说明 ( ? )" onClick={() => setHelpOpen(true)} innerHTML={SVG.help} />
                 <span class="grip" title="拖动调整大小" innerHTML={SVG.grip} />
               </span>
@@ -1472,7 +1599,7 @@ export function MainApp() {
                   <div class="help-h">快速录入语法</div>
                   <div class="help-row"><code>!1</code> <code>!2</code> <code>!3</code><span>高 / 中 / 低 重要度</span></div>
                   <div class="help-row"><code>#标签</code> <code>@清单</code><span>自动归类与打标</span></div>
-                  <div class="help-row"><code>明天18:00</code> <code>周五</code> <code>月底</code><span>智能识别截止日期</span></div>
+                  <div class="help-row"><code>明天18:00</code> <code>周五</code> <code>月底</code> <code>这个月底</code><span>智能识别截止日期</span></div>
                   <div class="help-row"><code>每天8:30</code> <code>每周三18点</code><span>重复任务（完成自动续期）</span></div>
                   <div class="help-row"><span>粘贴多行文本</span><span>批量拆分为多条待办</span></div>
                 </div>
@@ -1498,6 +1625,10 @@ export function MainApp() {
           {/* 删除确认弹窗 */}
           <Show when={deleteConfirmTask()}>
             <DeleteModal task={deleteConfirmTask()!} onClose={() => setDeleteConfirmTask(null)} />
+          </Show>
+          {/* 回收站面板 */}
+          <Show when={trashOpen()}>
+            <TrashPanel />
           </Show>
         </div>
 

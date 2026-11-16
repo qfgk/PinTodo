@@ -69,8 +69,12 @@ async function main() {
     try {
       if (origTasks !== null) writeFileSync(TASKS_JSON, origTasks)
       if (origSettings !== null) writeFileSync(SETTINGS_JSON, origSettings)
+      // 保护用户回收站不被启动时自动清理
+      if (origTrash !== null) writeFileSync(TRASH_JSON, origTrash)
     } catch {}
   }
+  const TRASH_JSON = join(DATA_DIR, 'trash.json')
+  const origTrash = existsSync(TRASH_JSON) ? readFileSync(TRASH_JSON, 'utf-8') : null
 
   try { execSync('taskkill /IM todo.exe /F', { stdio: 'ignore' }) } catch {}
   await sleep(1200)
